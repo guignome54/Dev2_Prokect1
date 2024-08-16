@@ -1,0 +1,14 @@
+[
+    {
+        "nom": "facture1.pdf",
+        "date_creation": "2024-01-01T10:00:00",
+        "date_modification": "2024-01-02T12:00:00",
+        "taille": 1024
+    },
+    {
+        "nom": "facture2.pdf",
+        "date_creation": "2024-02-01T10:00:00",
+        "date_modification": "2024-02-02T12:00:00",
+        "taille": 2048
+    }
+]
