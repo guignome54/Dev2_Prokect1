@@ -1,153 +1,213 @@
-import argparse
-import cmd
-import csv
 import os
-import sqlite3
 import time
+import csv
+from datetime import datetime
+import argparse
+import logging
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-import logging
+import cmd
 
-# Configurer le logger
-logging.basicConfig(filename='file_monitor.log', level=logging.INFO,
-                    format='%(asctime)s - %(message)s')
 
-# Fonction pour extraire les métadonnées d'un fichier
-def get_file_metadata(file_path):
-    stat = os.stat(file_path)
-    return {
-        'name': os.path.basename(file_path),
-        'creation_date': time.ctime(stat.st_ctime),
-        'modification_date': time.ctime(stat.st_mtime),
-        'size': stat.st_size
-    }
+class GestionFichiers:
+    @staticmethod
+    def obtenir_metadonnees(repertoire):
+        """
+        Retourne une liste de dictionnaires contenant les métadonnées des fichiers dans un répertoire.
 
-# Classe pour gérer les événements de modification des fichiers
-class FileEventHandler(FileSystemEventHandler):
-    def __init__(self, db_type, db_path):
-        self.db_type = db_type
-        self.db_path = db_path
+        Préconditions:
+        - `repertoire` doit exister, être un chemin valide et accessible.
+        - L'utilisateur doit avoir les droits nécessaires pour accéder au répertoire.
 
-    def process_event(self, event, event_type):
-        file_path = event.src_path
-        if os.path.isfile(file_path):
-            metadata = get_file_metadata(file_path)
-            log_message = f"{event_type} - {file_path}: {metadata}"
-            logging.info(log_message)
-            if self.db_type == 'csv':
-                self.update_csv(metadata)
-            elif self.db_type == 'sqlite':
-                self.update_sqlite(metadata)
-            # Ajouter ici les actions spécifiques à exécuter (bonus)
+        Postconditions:
+        - Retourne une liste de dictionnaires contenant les métadonnées des fichiers présents dans le répertoire.
+        - Les fichiers non accessibles ou avec des permissions restreintes sont ignorés.
 
-    def update_csv(self, metadata):
-        file_exists = os.path.isfile(self.db_path)
-        with open(self.db_path, 'a', newline='') as csvfile:
-            fieldnames = ['name', 'creation_date', 'modification_date', 'size']
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            if not file_exists:
-                writer.writeheader()
-            writer.writerow(metadata)
+        Erreurs possibles:
+        - `FileNotFoundError`: Le répertoire n'existe pas.
+        - `PermissionError`: L'accès au répertoire est refusé.
+        """
+        metadonnees_fichiers = []
 
-    def update_sqlite(self, metadata):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS file_metadata (
-                name TEXT,
-                creation_date TEXT,
-                modification_date TEXT,
-                size INTEGER
-            )
-        ''')
-        cursor.execute('''
-            INSERT INTO file_metadata (name, creation_date, modification_date, size)
-            VALUES (?, ?, ?, ?)
-        ''', (metadata['name'], metadata['creation_date'], metadata['modification_date'], metadata['size']))
-        conn.commit()
-        conn.close()
+        try:
+            for nom_fichier in os.listdir(repertoire):
+                chemin_complet = os.path.join(repertoire, nom_fichier)
 
-    def on_created(self, event):
-        self.process_event(event, "Création")
+                if os.path.isfile(chemin_complet):
+                    taille = os.path.getsize(chemin_complet)
+                    date_creation = datetime.fromtimestamp(os.path.getctime(chemin_complet)).strftime('%Y-%m-%d %H:%M:%S')
+                    date_modification = datetime.fromtimestamp(os.path.getmtime(chemin_complet)).strftime('%Y-%m-%d %H:%M:%S')
 
-    def on_modified(self, event):
-        self.process_event(event, "Modification")
+                    metadonnees_fichiers.append({
+                        'nom': nom_fichier,
+                        'date_creation': date_creation,
+                        'date_modification': date_modification,
+                        'taille': taille
+                    })
+        except FileNotFoundError as e:
+            raise FileNotFoundError(f"Le répertoire '{repertoire}' n'existe pas.") from e
+        except PermissionError as e:
+            raise PermissionError(f"Permission refusée pour accéder au répertoire '{repertoire}'.") from e
 
-    def on_deleted(self, event):
-        file_path = event.src_path
-        log_message = f"Suppression - {file_path}"
-        logging.info(log_message)
-        if self.db_type == 'csv':
-            self.remove_from_csv(file_path)
-        elif self.db_type == 'sqlite':
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute('DELETE FROM file_metadata WHERE name = ?', (os.path.basename(file_path),))
-            conn.commit()
-            conn.close()
+        return metadonnees_fichiers
 
-    def remove_from_csv(self, file_path):
-        rows = []
-        file_exists = os.path.isfile(self.db_path)
-        if file_exists:
-            with open(self.db_path, 'r', newline='') as csvfile:
-                reader = csv.DictReader(csvfile)
-                for row in reader:
-                    if row['name'] != os.path.basename(file_path):
-                        rows.append(row)
-            with open(self.db_path, 'w', newline='') as csvfile:
-                fieldnames = ['name', 'creation_date', 'modification_date', 'size']
+    @staticmethod
+    def lire_csv(fichier_csv):
+        """
+        Lit les données existantes d'un fichier CSV et retourne un dictionnaire avec le nom du fichier comme clé.
+
+        Préconditions:
+        - `fichier_csv` doit exister et être accessible.
+        - Le fichier doit être au format CSV valide avec les colonnes attendues.
+
+        Postconditions:
+        - Retourne un dictionnaire où chaque clé est le nom du fichier, et la valeur est un dictionnaire des métadonnées.
+
+        Erreurs possibles:
+        - `FileNotFoundError`: Le fichier CSV n'existe pas.
+        - `PermissionError`: Le fichier CSV ne peut pas être lu.
+        - `csv.Error`: Le fichier CSV contient une structure invalide.
+        """
+        donnees_existantes = {}
+        if os.path.exists(fichier_csv):
+            try:
+                with open(fichier_csv, 'r', encoding='utf-8') as csvfile:
+                    reader = csv.DictReader(csvfile)
+                    for row in reader:
+                        donnees_existantes[row['Nom du fichier']] = row
+            except FileNotFoundError as e:
+                raise FileNotFoundError(f"Le fichier CSV '{fichier_csv}' n'existe pas.") from e
+            except PermissionError as e:
+                raise PermissionError(f"Impossible d'accéder au fichier CSV '{fichier_csv}'.") from e
+            except csv.Error as e:
+                raise ValueError(f"Le fichier CSV '{fichier_csv}' est mal formé.") from e
+
+        return donnees_existantes
+
+    @staticmethod
+    def ecrire_csv(metadonnees, fichier_csv):
+        """
+        Écrit ou met à jour les métadonnées dans un fichier CSV sans doublons.
+
+        Préconditions:
+        - `metadonnees` doit être une liste de dictionnaires avec les clés 'nom', 'date_creation', 'date_modification', et 'taille'.
+        - `fichier_csv` doit être accessible en écriture.
+
+        Postconditions:
+        - Les métadonnées sont ajoutées ou mises à jour dans le fichier CSV.
+        - Les données existantes dans le CSV sont conservées et mises à jour.
+
+        Erreurs possibles:
+        - `PermissionError`: Le fichier CSV ne peut pas être écrit.
+        - `csv.Error`: Échec de l'écriture dans le fichier CSV.
+        """
+        donnees_existantes = GestionFichiers.lire_csv(fichier_csv)
+
+        try:
+            for donnee in metadonnees:
+                donnees_existantes[donnee['nom']] = {
+                    'Nom du fichier': donnee['nom'],
+                    'Date de création': donnee['date_creation'],
+                    'Date de modification': donnee['date_modification'],
+                    'Taille (octets)': donnee['taille']
+                }
+
+            with open(fichier_csv, 'w', newline='', encoding='utf-8') as csvfile:
+                fieldnames = ['Nom du fichier', 'Date de création', 'Date de modification', 'Taille (octets)']
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                 writer.writeheader()
-                writer.writerows(rows)
+                for row in donnees_existantes.values():
+                    writer.writerow(row)
+        except PermissionError as e:
+            raise PermissionError(f"Impossible d'écrire dans le fichier CSV '{fichier_csv}'.") from e
+        except csv.Error as e:
+            raise ValueError(f"Erreur lors de l'écriture dans le fichier CSV '{fichier_csv}'.") from e
 
-# Interface en ligne de commande
-class FileMonitorShell(cmd.Cmd):
-    intro = 'Bienvenue dans le shell de surveillance des fichiers. Tapez help ou ? pour voir les commandes disponibles.\n'
-    prompt = '(file-monitor) '
 
-    def do_start(self, arg):
-        'Démarrer la surveillance: start <répertoire> <csv/sqlite> <chemin_du_fichier_db>'
+
+class Surveillance(FileSystemEventHandler):
+    def __init__(self, log_file, fichier_csv=None):
+        self.log_file = log_file
+        self.fichier_csv = fichier_csv
+
+    def on_created(self, event):
+        if not event.is_directory:
+            self.log_event(event, "Créé")
+
+    def on_deleted(self, event):
+        if not event.is_directory:
+            self.log_event(event, "Supprimé")
+
+    def on_modified(self, event):
+        if not event.is_directory:
+            self.log_event(event, "Modifié")
+
+    def log_event(self, event, action):
+        """
+        Enregistre un événement de fichier dans le log et met à jour le fichier CSV.
+
+        Préconditions:
+        - `event` doit contenir un chemin valide vers un fichier ou répertoire.
+        - `action` doit être une chaîne décrivant l'événement ('Créé', 'Modifié', 'Supprimé').
+
+        Postconditions:
+        - L'événement est consigné dans le fichier log.
+        - Si applicable, les métadonnées des fichiers sont mises à jour dans le CSV.
+
+        Erreurs possibles:
+        - `PermissionError`: Échec d'écriture dans le fichier log ou CSV.
+        """
+        try:
+            with open(self.log_file, 'a', encoding='utf-8') as f:
+                f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {action}: {event.src_path}\n")
+        except Exception as e:
+            raise IOError(f"Erreur lors de l'écriture dans le fichier log {self.log_file}: {e}")
+
+
+
+class Shell(cmd.Cmd):
+    intro = 'Bienvenue dans le shell interactif. Tapez help ou ? pour lister les commandes.\n'
+    prompt = '(shell) '
+
+    def do_scan(self, arg):
         try:
             args = arg.split()
-            if len(args) != 3:
-                raise ValueError("Nombre d'arguments incorrect")
-            directory, db_type, db_path = args
-            if db_type not in ['csv', 'sqlite']:
-                raise ValueError("Type de base de données invalide")
-            start_monitoring(directory, db_type, db_path)
+            if len(args) != 2:
+                raise ValueError("Usage: scan <repertoire> <fichier_csv>")
+            repertoire, fichier_csv = args
+            metadonnees = GestionFichiers.obtenir_metadonnees(repertoire)
+            GestionFichiers.ecrire_csv(metadonnees, fichier_csv)
+            print(f"Métadonnées enregistrées dans {fichier_csv}.")
         except Exception as e:
             print(f"Erreur: {e}")
 
-    def do_exit(self, arg):
-        'Quitter le shell: exit'
-        print('Arrêt du shell de surveillance des fichiers.')
-        return True
+    def do_watch(self, arg):
+        try:
+            args = arg.split()
+            if len(args) != 3:
+                raise ValueError("Usage: watch <repertoire> <fichier_log> <fichier_csv>")
+            repertoire, fichier_log, fichier_csv = args
+            if not os.path.isdir(repertoire):
+                raise ValueError(f"Le répertoire {repertoire} n'existe pas.")
+            event_handler = Surveillance(fichier_log, fichier_csv)
+            observer = Observer()
+            observer.schedule(event_handler, path=repertoire, recursive=True)
+            observer.start()
+            print("Surveillance en cours... Appuyez sur Ctrl+C pour arrêter.")
+            observer.join()
+        except KeyboardInterrupt:
+            print("\nArrêt de la surveillance.")
+        except Exception as e:
+            print(f"Erreur: {e}")
 
-# Fonction pour démarrer la surveillance
-def start_monitoring(directory, db_type, db_path):
-    event_handler = FileEventHandler(db_type, db_path)
-    observer = Observer()
-    observer.schedule(event_handler, directory, recursive=True)
-    observer.start()
-    print(f"Surveillance du répertoire {directory} commencée. Appuyez sur Ctrl+C pour arrêter.")
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        observer.stop()
-    observer.join()
 
-# Analyseur d'arguments
 def main():
-    parser = argparse.ArgumentParser(description="Script de surveillance des fichiers.")
-    parser.add_argument('directory', help="Répertoire à surveiller")
-    parser.add_argument('db_type', choices=['csv', 'sqlite'], help="Type de base de données (csv ou sqlite)")
-    parser.add_argument('db_path', help="Chemin du fichier de base de données")
+    parser = argparse.ArgumentParser(description="Script pour extraire et surveiller les métadonnées des fichiers.")
+    parser.add_argument('--shell', action='store_true', help='Lance le shell interactif.')
     args = parser.parse_args()
+    if args.shell:
+        Shell().cmdloop()
 
-    shell = FileMonitorShell()
-    shell.cmdloop()
 
 if __name__ == "__main__":
     main()
